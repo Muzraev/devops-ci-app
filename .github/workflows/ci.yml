@@ -107,3 +107,41 @@ jobs:
         run: |
           docker push "${IMAGE_NAME}:${GITHUB_SHA}"
           docker push "${IMAGE_NAME}:latest"
+
+  deploy:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, devops-vm]
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    concurrency:
+      group: deploy-devops-vm
+      cancel-in-progress: false
+    env:
+      VM_HOST: 192.168.56.102
+      ANSIBLE_FORCE_COLOR: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Deploy with Ansible
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          ansible-playbook -i inventory/prod.ini site.yml -e "app_tag=$GITHUB_SHA"
+      - name: Check through Nginx
+        run: |
+          set -euo pipefail
+          curl --noproxy '*' --fail --silent --show-error --max-time 15 \
+            "http://${VM_HOST}/health" --output /tmp/devops-health.json
+          python3 -m json.tool /tmp/devops-health.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("/tmp/devops-health.json").read_text())
+          assert payload == {"status": "ok"}, f"unexpected health response: {payload}"
+          PY
+          curl --noproxy '*' --fail --silent --show-error --max-time 15 "http://${VM_HOST}/"
+
